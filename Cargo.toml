@@ -5,6 +5,7 @@ edition = "2024"
 description = "A Linux command wrapper that reports process, resource, filesystem, and network activity."
 readme = "README.md"
 license = "MIT"
+repository = "https://github.com/lifrocszh/runlens"
 keywords = ["linux", "cli", "observability"]
 categories = ["command-line-utilities", "development-tools::debugging"]
 exclude = [".scratch/", "AGENTS.md", "docs/"]
