@@ -20,7 +20,7 @@ RunLens is local-only. It does not upload telemetry, capture network payloads, o
 
 ## Installation
 
-Once published, install the CLI from crates.io:
+Install the CLI from crates.io:
 
 ```sh
 cargo install runlens
