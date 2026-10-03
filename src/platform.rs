@@ -1,15 +1,41 @@
+#[cfg(target_os = "linux")]
 use std::collections::{HashMap, HashSet};
+#[cfg(target_os = "linux")]
 use std::fs;
 #[cfg(target_os = "linux")]
 use std::os::raw::{c_int, c_long};
+#[cfg(target_os = "linux")]
 use std::path::{Path, PathBuf};
 
+#[cfg(target_os = "linux")]
 use crate::formatting::sanitize_process_text;
+#[cfg(target_os = "linux")]
 use crate::network::{read_network_sockets, read_socket_inodes};
+#[cfg(target_os = "linux")]
 use crate::observation::{
-    FileDescriptor, FileDescriptorSnapshot, LinuxObservationBoundary, NetworkSnapshot,
-    ObservationBoundary, ProcessInfo, ProcessSnapshot,
+    FileDescriptor, FileDescriptorSnapshot, NetworkSnapshot, ObservationBoundary, ProcessInfo,
+    ProcessSnapshot,
 };
+
+#[cfg(target_os = "macos")]
+mod macos;
+#[cfg(target_os = "macos")]
+pub(crate) use macos::MacOsObservationBoundary;
+
+#[cfg(target_os = "linux")]
+pub(crate) struct LinuxObservationBoundary;
+
+#[cfg(target_os = "linux")]
+pub(crate) fn new_observation_boundary() -> LinuxObservationBoundary {
+    LinuxObservationBoundary
+}
+#[cfg(target_os = "macos")]
+pub(crate) fn new_observation_boundary() -> MacOsObservationBoundary {
+    MacOsObservationBoundary
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+compile_error!("RunLens currently supports Linux and macOS");
 
 #[cfg(target_os = "linux")]
 unsafe extern "C" {
@@ -19,6 +45,7 @@ unsafe extern "C" {
 #[cfg(target_os = "linux")]
 const SC_CLK_TCK: c_int = 2;
 
+#[cfg(target_os = "linux")]
 fn read_fd_access(fd_path: &Path) -> Option<(bool, bool)> {
     let fd = fd_path.file_name()?.to_str()?;
     let process_directory = fd_path.parent()?.parent()?;
@@ -36,6 +63,7 @@ fn read_fd_access(fd_path: &Path) -> Option<(bool, bool)> {
     }
 }
 
+#[cfg(target_os = "linux")]
 fn path_without_deleted_suffix(path: &Path) -> PathBuf {
     let text = path.to_string_lossy();
     text.strip_suffix(" (deleted)")
@@ -43,8 +71,9 @@ fn path_without_deleted_suffix(path: &Path) -> PathBuf {
         .unwrap_or_else(|| path.to_path_buf())
 }
 
+#[cfg(target_os = "linux")]
 impl ObservationBoundary for LinuxObservationBoundary {
-    fn process_snapshot(&self) -> ProcessSnapshot {
+    fn process_snapshot(&self, _root_pid: u32, _known_pids: &[u32]) -> ProcessSnapshot {
         current_processes()
     }
 
@@ -90,13 +119,14 @@ impl ObservationBoundary for LinuxObservationBoundary {
         let (inodes, inode_limited) = read_socket_inodes(pid)?;
         let (sockets, socket_limited) = read_network_sockets(pid)?;
         Some(NetworkSnapshot {
-            inodes,
+            socket_ids: inodes,
             sockets,
             limited: inode_limited || socket_limited,
         })
     }
 }
 
+#[cfg(target_os = "linux")]
 fn current_processes() -> ProcessSnapshot {
     let Ok(entries) = fs::read_dir("/proc") else {
         return ProcessSnapshot {
@@ -128,6 +158,7 @@ fn current_processes() -> ProcessSnapshot {
     }
 }
 
+#[cfg(target_os = "linux")]
 fn read_process_info(pid: u32) -> Option<ProcessInfo> {
     let stat = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
     let command_end = stat.rfind(") ")?;
@@ -137,8 +168,14 @@ fn read_process_info(pid: u32) -> Option<ProcessInfo> {
         .collect::<Vec<_>>();
     let state = fields.first()?.chars().next()?;
     let parent_pid = fields.get(1)?.parse().ok()?;
-    let user_cpu_ticks = fields.get(11).and_then(|value| value.parse().ok());
-    let system_cpu_ticks = fields.get(12).and_then(|value| value.parse().ok());
+    let user_cpu_nanos = fields
+        .get(11)
+        .and_then(|value| value.parse().ok())
+        .and_then(cpu_ticks_to_nanos);
+    let system_cpu_nanos = fields
+        .get(12)
+        .and_then(|value| value.parse().ok())
+        .and_then(cpu_ticks_to_nanos);
     let comm = &stat[command_start..command_end];
     let command =
         read_command_line(pid).unwrap_or_else(|| format!("[{}]", sanitize_process_text(comm)));
@@ -149,14 +186,15 @@ fn read_process_info(pid: u32) -> Option<ProcessInfo> {
         parent_pid,
         state,
         command,
-        user_cpu_ticks,
-        system_cpu_ticks,
+        user_cpu_nanos,
+        system_cpu_nanos,
         resident_memory_kib: read_resident_memory_kib(pid),
         read_storage_bytes,
         write_storage_bytes,
     })
 }
 
+#[cfg(target_os = "linux")]
 fn read_process_io(pid: u32) -> (Option<u64>, Option<u64>) {
     let Ok(io) = fs::read_to_string(format!("/proc/{pid}/io")) else {
         return (None, None);
@@ -179,6 +217,7 @@ fn read_process_io(pid: u32) -> (Option<u64>, Option<u64>) {
     (read_storage_bytes, write_storage_bytes)
 }
 
+#[cfg(target_os = "linux")]
 fn read_resident_memory_kib(pid: u32) -> Option<u64> {
     let status = fs::read_to_string(format!("/proc/{pid}/status")).ok()?;
     status.lines().find_map(|line| {
@@ -191,6 +230,7 @@ fn read_resident_memory_kib(pid: u32) -> Option<u64> {
     })
 }
 
+#[cfg(target_os = "linux")]
 fn read_command_line(pid: u32) -> Option<String> {
     let bytes = fs::read(format!("/proc/{pid}/cmdline")).ok()?;
     let command = bytes
@@ -204,11 +244,18 @@ fn read_command_line(pid: u32) -> Option<String> {
 
 #[cfg(target_os = "linux")]
 pub(crate) fn clock_ticks_per_second() -> Option<u64> {
-    let ticks = unsafe { sysconf(SC_CLK_TCK) };
-    u64::try_from(ticks).ok().filter(|ticks| *ticks > 0)
+    static TICKS: std::sync::OnceLock<Option<u64>> = std::sync::OnceLock::new();
+    *TICKS.get_or_init(|| {
+        let ticks = unsafe { sysconf(SC_CLK_TCK) };
+        u64::try_from(ticks).ok().filter(|ticks| *ticks > 0)
+    })
 }
 
-#[cfg(not(target_os = "linux"))]
-fn clock_ticks_per_second() -> Option<u64> {
-    None
+#[cfg(target_os = "linux")]
+fn cpu_ticks_to_nanos(ticks: u64) -> Option<u64> {
+    let ticks_per_second = clock_ticks_per_second()?;
+    let nanos = u128::from(ticks)
+        .checked_mul(1_000_000_000)?
+        .checked_div(u128::from(ticks_per_second))?;
+    u64::try_from(nanos).ok()
 }

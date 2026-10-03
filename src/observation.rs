@@ -8,7 +8,6 @@ use crate::formatting::{
     sanitize_process_text, signal_name,
 };
 use crate::network::{NetworkObservation, SocketRecord};
-use crate::platform::clock_ticks_per_second;
 
 const EXCESSIVE_SCAN_PATHS: usize = 25;
 
@@ -38,12 +37,10 @@ pub(crate) struct ProcessSnapshot {
 }
 
 pub(crate) trait ObservationBoundary {
-    fn process_snapshot(&self) -> ProcessSnapshot;
+    fn process_snapshot(&self, root_pid: u32, known_pids: &[u32]) -> ProcessSnapshot;
     fn file_descriptors(&self, pid: u32) -> Option<FileDescriptorSnapshot>;
     fn network_snapshot(&self, pid: u32) -> Option<NetworkSnapshot>;
 }
-
-pub(crate) struct LinuxObservationBoundary;
 
 pub(crate) struct FileDescriptor {
     pub(crate) path: PathBuf,
@@ -58,7 +55,7 @@ pub(crate) struct FileDescriptorSnapshot {
 }
 
 pub(crate) struct NetworkSnapshot {
-    pub(crate) inodes: HashSet<u64>,
+    pub(crate) socket_ids: HashSet<u64>,
     pub(crate) sockets: HashMap<u64, SocketRecord>,
     pub(crate) limited: bool,
 }
@@ -74,8 +71,8 @@ pub(crate) struct ProcessInfo {
     pub(crate) parent_pid: u32,
     pub(crate) state: char,
     pub(crate) command: String,
-    pub(crate) user_cpu_ticks: Option<u64>,
-    pub(crate) system_cpu_ticks: Option<u64>,
+    pub(crate) user_cpu_nanos: Option<u64>,
+    pub(crate) system_cpu_nanos: Option<u64>,
     pub(crate) resident_memory_kib: Option<u64>,
     pub(crate) read_storage_bytes: Option<u64>,
     pub(crate) write_storage_bytes: Option<u64>,
@@ -99,7 +96,8 @@ impl ProcessObservation {
         boundary: &B,
         root_expected_alive: bool,
     ) {
-        let snapshot = boundary.process_snapshot();
+        let known_pids = self.descendants.keys().copied().collect::<Vec<_>>();
+        let snapshot = boundary.process_snapshot(self.root_pid, &known_pids);
         let snapshot_available = snapshot.available;
         let processes = snapshot.processes;
         let root_available = processes.contains_key(&self.root_pid);
@@ -175,8 +173,8 @@ impl ProcessObservation {
         if current_tree.iter().any(|pid| {
             processes.get(pid).is_some_and(|info| {
                 info.is_alive()
-                    && (info.user_cpu_ticks.is_none()
-                        || info.system_cpu_ticks.is_none()
+                    && (info.user_cpu_nanos.is_none()
+                        || info.system_cpu_nanos.is_none()
                         || info.resident_memory_kib.is_none())
             })
         }) {
@@ -197,7 +195,8 @@ impl ProcessObservation {
         exit_code: Option<i32>,
         termination_signal: Option<i32>,
     ) {
-        let snapshot = boundary.process_snapshot();
+        let known_pids = self.descendants.keys().copied().collect::<Vec<_>>();
+        let snapshot = boundary.process_snapshot(self.root_pid, &known_pids);
         let known_process_unreadable = snapshot.unreadable_pids.contains(&self.root_pid)
             || self
                 .descendants
@@ -432,23 +431,19 @@ impl ProcessObservation {
 
     fn aggregate_cpu_millis(&self, user: bool) -> Option<u64> {
         self.primary.as_ref()?;
-        let ticks = self
+        let nanos = self
             .primary
             .iter()
             .chain(self.descendants.values())
             .try_fold(0_u64, |total, process| {
                 let process_ticks = if user {
-                    process.info.user_cpu_ticks?
+                    process.info.user_cpu_nanos?
                 } else {
-                    process.info.system_cpu_ticks?
+                    process.info.system_cpu_nanos?
                 };
                 total.checked_add(process_ticks)
             })?;
-        let ticks_per_second = clock_ticks_per_second()?;
-        let milliseconds = u128::from(ticks)
-            .checked_mul(1_000)?
-            .checked_div(u128::from(ticks_per_second))?;
-        u64::try_from(milliseconds).ok()
+        nanos.checked_div(1_000_000)
     }
 
     fn update_peak_memory(
@@ -476,11 +471,11 @@ impl ObservedProcess {
     fn update(&mut self, info: &ProcessInfo) {
         self.info.state = info.state;
         self.info.command.clone_from(&info.command);
-        if info.user_cpu_ticks.is_some() {
-            self.info.user_cpu_ticks = info.user_cpu_ticks;
+        if info.user_cpu_nanos.is_some() {
+            self.info.user_cpu_nanos = info.user_cpu_nanos;
         }
-        if info.system_cpu_ticks.is_some() {
-            self.info.system_cpu_ticks = info.system_cpu_ticks;
+        if info.system_cpu_nanos.is_some() {
+            self.info.system_cpu_nanos = info.system_cpu_nanos;
         }
         if info.resident_memory_kib.is_some() {
             self.info.resident_memory_kib = info.resident_memory_kib;

@@ -1,6 +1,11 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
+#[cfg(target_os = "linux")]
 use std::fs;
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use std::net::IpAddr;
+#[cfg(target_os = "macos")]
+use std::net::SocketAddr;
+#[cfg(target_os = "linux")]
+use std::net::{Ipv4Addr, Ipv6Addr};
 
 use crate::formatting::{MAX_DETAIL_ITEMS, sanitize_process_text};
 use crate::observation::{ObservationBoundary, ProcessInfo};
@@ -20,6 +25,7 @@ enum SocketProtocol {
 }
 
 impl SocketProtocol {
+    #[cfg(target_os = "linux")]
     fn table(self) -> (&'static str, bool) {
         match self {
             Self::Tcp => ("tcp", false),
@@ -110,8 +116,8 @@ impl NetworkObservation {
         self.backend_available = true;
         self.observation_limited |= snapshot.limited;
 
-        for inode in snapshot.inodes {
-            let Some(socket) = snapshot.sockets.get(&inode) else {
+        for socket_id in snapshot.socket_ids {
+            let Some(socket) = snapshot.sockets.get(&socket_id) else {
                 continue;
             };
             let connection = self
@@ -135,7 +141,7 @@ impl NetworkObservation {
         if !self.backend_available {
             eprintln!("  Network connections: unavailable");
             eprintln!(
-                "  Network observation limits: Linux /proc network metadata was unavailable; payloads are not captured."
+                "  Network observation limits: native process socket metadata was unavailable; payloads are not captured."
             );
             return;
         }
@@ -190,9 +196,9 @@ impl NetworkObservation {
         }
 
         let limits = if self.observation_limited {
-            "endpoints are sampled from process socket descriptors and /proc network tables; short-lived sockets or restricted processes may be missed; payloads are not captured."
+            "endpoints are sampled from process socket descriptors; short-lived sockets or restricted processes may be missed; payloads are not captured."
         } else {
-            "endpoints are sampled from process socket descriptors and /proc network tables; short-lived sockets may be missed; payloads are not captured."
+            "endpoints are sampled from process socket descriptors; short-lived sockets may be missed; payloads are not captured."
         };
         eprintln!("  Network observation limits: {limits}");
     }
@@ -225,6 +231,39 @@ impl NetworkConnectionKey {
     }
 }
 
+impl SocketRecord {
+    #[cfg(target_os = "macos")]
+    pub(crate) fn from_socket_addrs(
+        protocol: &str,
+        local: SocketAddr,
+        remote: SocketAddr,
+        state: String,
+    ) -> Option<Self> {
+        let protocol = match (protocol, local.is_ipv6(), remote.is_ipv6()) {
+            ("TCP", false, false) => SocketProtocol::Tcp,
+            ("TCP", true, true) => SocketProtocol::Tcp6,
+            ("UDP", false, false) => SocketProtocol::Udp,
+            ("UDP", true, true) => SocketProtocol::Udp6,
+            _ => return None,
+        };
+        Some(Self {
+            key: NetworkConnectionKey {
+                protocol,
+                local: NetworkEndpoint {
+                    address: local.ip().to_string(),
+                    port: local.port(),
+                },
+                remote: NetworkEndpoint {
+                    address: remote.ip().to_string(),
+                    port: remote.port(),
+                },
+            },
+            state,
+        })
+    }
+}
+
+#[cfg(target_os = "linux")]
 pub(crate) fn read_socket_inodes(pid: u32) -> Option<(HashSet<u64>, bool)> {
     let entries = fs::read_dir(format!("/proc/{pid}/fd")).ok()?;
     let mut inodes = HashSet::new();
@@ -251,6 +290,7 @@ pub(crate) fn read_socket_inodes(pid: u32) -> Option<(HashSet<u64>, bool)> {
     Some((inodes, limited))
 }
 
+#[cfg(target_os = "linux")]
 pub(crate) fn read_network_sockets(pid: u32) -> Option<(HashMap<u64, SocketRecord>, bool)> {
     let protocols = [
         SocketProtocol::Tcp,
@@ -281,6 +321,7 @@ pub(crate) fn read_network_sockets(pid: u32) -> Option<(HashMap<u64, SocketRecor
     read_any.then_some((sockets, limited))
 }
 
+#[cfg(target_os = "linux")]
 fn parse_network_socket(
     line: &str,
     protocol: SocketProtocol,
@@ -299,6 +340,7 @@ fn parse_network_socket(
     Some((inode, SocketRecord { key, state }))
 }
 
+#[cfg(target_os = "linux")]
 fn parse_network_endpoint(value: &str, ipv6: bool) -> Option<NetworkEndpoint> {
     let (address, port) = value.rsplit_once(':')?;
     let port = u16::from_str_radix(port, 16).ok()?;
@@ -310,6 +352,7 @@ fn parse_network_endpoint(value: &str, ipv6: bool) -> Option<NetworkEndpoint> {
     Some(NetworkEndpoint { address, port })
 }
 
+#[cfg(target_os = "linux")]
 fn decode_ipv4_address(value: &str) -> Option<String> {
     if value.len() != 8 {
         return None;
@@ -318,6 +361,7 @@ fn decode_ipv4_address(value: &str) -> Option<String> {
     Some(Ipv4Addr::from(address).to_string())
 }
 
+#[cfg(target_os = "linux")]
 fn decode_ipv6_address(value: &str) -> Option<String> {
     if value.len() != 32 {
         return None;
@@ -334,6 +378,7 @@ fn decode_ipv6_address(value: &str) -> Option<String> {
     Some(Ipv6Addr::from(address).to_string())
 }
 
+#[cfg(target_os = "linux")]
 fn network_socket_state(protocol: SocketProtocol, value: &str) -> Option<String> {
     let state = u8::from_str_radix(value, 16).ok()?;
     let name = match protocol {

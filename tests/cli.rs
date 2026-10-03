@@ -2,15 +2,19 @@ use std::fs;
 #[cfg(target_os = "linux")]
 use std::fs::{File, OpenOptions};
 #[cfg(target_os = "linux")]
-use std::io::{Read, Write};
+use std::io::Read;
+#[cfg(unix)]
+use std::io::Write;
 #[cfg(target_os = "linux")]
-use std::net::{SocketAddr, TcpListener, TcpStream, UdpSocket};
+use std::net::SocketAddr;
+#[cfg(unix)]
+use std::net::{TcpListener, TcpStream, UdpSocket};
 #[cfg(target_os = "linux")]
 use std::os::raw::{c_int, c_ulong};
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 use std::process::Stdio;
 use std::process::{Command, Output};
 use std::thread;
@@ -39,12 +43,12 @@ fn runlens_in(directory: &Path, args: &[&str]) -> Output {
         .expect("runlens should start")
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 fn runlens_with_env(args: &[String], environment: &[(&str, &str)]) -> Output {
     runlens_in_with_env(Path::new("."), args, environment)
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 fn runlens_in_with_env(directory: &Path, args: &[String], environment: &[(&str, &str)]) -> Output {
     let mut command = Command::new(env!("CARGO_BIN_EXE_runlens"));
     command.current_dir(directory);
@@ -111,14 +115,14 @@ impl Drop for SurvivorCleanup {
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 struct LoopbackListener {
     address: String,
     stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
     thread: Option<thread::JoinHandle<()>>,
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 impl LoopbackListener {
     fn new() -> Self {
         let listener = TcpListener::bind(("127.0.0.1", 0)).expect("loopback listener should bind");
@@ -129,6 +133,7 @@ impl LoopbackListener {
         Self::from_listener(listener, address)
     }
 
+    #[cfg(target_os = "linux")]
     fn non_loopback() -> Option<Self> {
         let route = UdpSocket::bind(("0.0.0.0", 0)).ok()?;
         route.connect(("198.51.100.1", 9)).ok()?;
@@ -177,7 +182,7 @@ impl LoopbackListener {
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 impl Drop for LoopbackListener {
     fn drop(&mut self) {
         self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
@@ -187,6 +192,7 @@ impl Drop for LoopbackListener {
     }
 }
 
+#[cfg(target_os = "linux")]
 fn process_is_alive(pid: u32) -> bool {
     let Ok(stat) = fs::read_to_string(format!("/proc/{pid}/stat")) else {
         return false;
@@ -195,6 +201,19 @@ fn process_is_alive(pid: u32) -> bool {
         return false;
     };
     !matches!(stat[command_end + 2..].chars().next(), Some('Z' | 'X'))
+}
+
+#[cfg(target_os = "macos")]
+fn process_is_alive(pid: u32) -> bool {
+    let Ok(output) = Command::new("ps")
+        .args(["-o", "stat=", "-p"])
+        .arg(pid.to_string())
+        .output()
+    else {
+        return false;
+    };
+    let state = String::from_utf8_lossy(&output.stdout);
+    output.status.success() && !state.trim().is_empty() && !state.trim_start().starts_with('Z')
 }
 
 fn resource_value(report: &str, label: &str, unit: &str) -> Option<u64> {
@@ -220,7 +239,7 @@ fn resource_value(report: &str, label: &str, unit: &str) -> Option<u64> {
     )
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 #[test]
 fn network_fixture() {
     let Ok(address) = std::env::var("RUNLENS_NETWORK_FIXTURE_ADDR") else {
@@ -240,6 +259,21 @@ fn network_fixture() {
         .and_then(|value| value.parse().ok())
         .unwrap_or(250);
     thread::sleep(Duration::from_millis(hold_millis));
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn udp_network_fixture() {
+    let Ok(address) = std::env::var("RUNLENS_UDP_FIXTURE_ADDR") else {
+        return;
+    };
+
+    let socket = UdpSocket::bind(("127.0.0.1", 0)).expect("UDP fixture should bind");
+    socket.connect(address).expect("UDP fixture should connect");
+    socket
+        .send(b"runlens-udp-payload-must-not-appear")
+        .expect("UDP fixture should send");
+    thread::sleep(Duration::from_millis(1_000));
 }
 
 #[cfg(target_os = "linux")]
@@ -399,7 +433,7 @@ fn distinguishes_launch_failure_from_wrapped_failure() {
     assert!(!stderr.contains("Exit status:"));
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 #[test]
 fn forwards_signal_and_preserves_signal_termination() {
     let sandbox = TestDirectory::new("signal");
@@ -494,7 +528,15 @@ fn reports_descendant_count_and_parent_relationships() {
     assert!(report.contains("Process count: 1"), "{report}");
     assert!(report.contains("Process tree:"), "{report}");
     assert!(report.contains("parent PID"), "{report}");
-    assert!(report.contains("sleep 0.2"), "{report}");
+    let process_tree = report
+        .split("Process tree:")
+        .nth(1)
+        .and_then(|section| section.split("Filesystem:").next())
+        .expect("process tree should exist");
+    #[cfg(target_os = "linux")]
+    assert!(process_tree.contains("sleep 0.2"), "{report}");
+    #[cfg(target_os = "macos")]
+    assert!(process_tree.contains("sleep"), "{report}");
 }
 
 #[test]
@@ -509,8 +551,19 @@ fn reports_aggregate_cpu_and_peak_resident_memory() {
 
     let report = String::from_utf8(output.stderr).expect("report should be UTF-8");
     assert!(report.contains("Resource usage:"), "{report}");
+    let process_tree = report
+        .split("Process tree:")
+        .nth(1)
+        .and_then(|section| section.split("Filesystem:").next())
+        .expect("process tree should exist");
+    #[cfg(target_os = "linux")]
     assert!(
-        report.contains("awk BEGIN"),
+        process_tree.contains("awk BEGIN"),
+        "fixture descendant missing:\n{report}"
+    );
+    #[cfg(target_os = "macos")]
+    assert!(
+        process_tree.contains("awk"),
         "fixture descendant missing:\n{report}"
     );
 
@@ -547,7 +600,7 @@ fn reports_filesystem_reads_and_separates_outside_paths() {
         &[
             "/bin/sh",
             "-c",
-            "exec 3< \"$1\"; exec 4< \"$2\"; dd if=/proc/self/fd/3 of=/dev/null bs=1 count=8 status=none; dd if=/proc/self/fd/4 of=/dev/null bs=1 count=8 status=none; sleep 0.2",
+            "exec 3< \"$1\"; exec 4< \"$2\"; cat <&3 >/dev/null; cat <&4 >/dev/null; sleep 0.2",
             "filesystem-read-fixture",
             "inside-input.txt",
             outside.to_str().expect("outside path should be UTF-8"),
@@ -669,7 +722,7 @@ fn reports_survivor_and_preserves_primary_exit_without_killing_it() {
     assert!(process_is_alive(pid), "survivor should remain alive");
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 #[test]
 fn reports_loopback_network_connection_without_payload_or_public_network() {
     let listener = LoopbackListener::new();
@@ -700,6 +753,39 @@ fn reports_loopback_network_connection_without_payload_or_public_network() {
     assert!(report.contains(&listener.address), "{report}");
     assert!(
         !report.contains("runlens-network-payload-must-not-appear"),
+        "network payload leaked into report:\n{report}"
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn reports_loopback_udp_connection_without_payload() {
+    let receiver = UdpSocket::bind(("127.0.0.1", 0)).expect("loopback UDP receiver should bind");
+    let address = receiver
+        .local_addr()
+        .expect("loopback UDP receiver should have an address")
+        .to_string();
+    let fixture = std::env::current_exe()
+        .expect("test executable should be available")
+        .to_string_lossy()
+        .into_owned();
+    let args = vec![
+        fixture,
+        "--exact".to_owned(),
+        "udp_network_fixture".to_owned(),
+        "--nocapture".to_owned(),
+    ];
+    let output = runlens_with_env(&args, &[("RUNLENS_UDP_FIXTURE_ADDR", &address)]);
+
+    assert!(output.status.success());
+    let report = String::from_utf8(output.stderr).expect("report should be UTF-8");
+    assert!(report.contains("Network connections:"), "{report}");
+    assert!(report.contains("Local connections: 1"), "{report}");
+    assert!(report.contains("Remote connections: 0"), "{report}");
+    assert!(report.contains("UDP local 127.0.0.1:"), "{report}");
+    assert!(report.contains(&address), "{report}");
+    assert!(
+        !report.contains("runlens-udp-payload-must-not-appear"),
         "network payload leaked into report:\n{report}"
     );
 }
@@ -738,7 +824,7 @@ fn reports_remote_network_activity_as_a_notable_finding() {
     assert!(report.contains(&listener.address), "{report}");
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 #[test]
 fn reports_network_connection_for_surviving_process() {
     let listener = LoopbackListener::new();

@@ -1,6 +1,6 @@
 # RunLens
 
-RunLens is a Linux command wrapper that observes a command and its descendants, then prints a concise execution report.
+RunLens is a Linux and macOS command wrapper that observes a command and its descendants, then prints a concise execution report.
 
 The report can include:
 
@@ -15,7 +15,7 @@ RunLens is local-only. It does not upload telemetry, capture network payloads, o
 
 ## Requirements
 
-- Linux
+- Linux or macOS
 - Rust and Cargo (stable toolchain)
 
 ## Installation
@@ -63,9 +63,10 @@ Shell syntax is not interpreted implicitly. Invoke a shell explicitly when neede
 
 ## Report notes
 
-The filesystem boundary defaults to RunLens's current working directory. Observation uses Linux process and `/proc` metadata and is best-effort:
+The filesystem boundary defaults to RunLens's current working directory. Observation uses `/proc` on Linux and native process metadata on macOS. Both backends are best-effort:
 
 - short-lived activity or inaccessible process metadata may be missed;
+- macOS permissions may restrict process, file descriptor, or socket metadata;
 - filesystem paths are sampled from open descriptors and do not prove a completed operation;
 - byte totals are aggregate kernel-reported storage I/O and are not path-specific;
 - network payloads are never captured; and
@@ -84,8 +85,8 @@ cargo clippy --all-targets -- -D warnings
 cargo test
 ```
 
-The CLI and Linux observation behavior are covered by integration tests in `tests/cli.rs`.
+The CLI suite in `tests/cli.rs` includes Linux- and macOS-specific cases. Run it on each platform to exercise that platform's native observation backend.
 
 ## Scope
 
-This is the RunLens MVP. It intentionally does not provide a dashboard, cloud service, persistent run history, raw syscall or packet output, automatic remediation, or non-Linux observation backends.
+This is the RunLens MVP. It supports best-effort process, resource, filesystem, and network observation on Linux and macOS. It intentionally does not provide a dashboard, cloud service, persistent run history, raw syscall or packet output, or automatic remediation.

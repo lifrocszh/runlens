@@ -6,36 +6,37 @@ mod platform;
 mod report;
 
 use std::env;
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 use std::io::Write;
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 use std::os::raw::c_int;
 #[cfg(unix)]
 use std::os::unix::process::ExitStatusExt;
 use std::process::{Command, ExitStatus, exit};
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 use std::sync::atomic::{AtomicI32, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use formatting::format_command;
-use observation::{LinuxObservationBoundary, ProcessObservation};
+use observation::ProcessObservation;
+use platform::new_observation_boundary;
 use report::ExecutionReport;
 
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 unsafe extern "C" {
     fn kill(pid: c_int, signal: c_int) -> c_int;
     fn getpid() -> c_int;
     fn signal(signal: c_int, handler: usize) -> usize;
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 const SIG_DFL: usize = 0;
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 const SIGNALS_TO_FORWARD: [c_int; 4] = [1, 2, 3, 15];
 const OBSERVATION_INTERVAL: Duration = Duration::from_millis(50);
 
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 static RECEIVED_SIGNAL: AtomicI32 = AtomicI32::new(0);
 
 fn main() {
@@ -46,7 +47,7 @@ fn main() {
     };
 
     install_signal_handlers();
-    let boundary = LinuxObservationBoundary;
+    let boundary = new_observation_boundary();
     let mut child = match Command::new(program).args(&args[1..]).spawn() {
         Ok(child) => child,
         Err(error) => {
@@ -95,15 +96,15 @@ fn main() {
     exit(status.code().unwrap_or(1));
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 extern "C" fn record_signal(signal: c_int) {
     let _ = RECEIVED_SIGNAL.compare_exchange(0, signal, Ordering::Relaxed, Ordering::Relaxed);
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(unix))]
 fn install_signal_handlers() {}
 
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 fn install_signal_handlers() {
     for signal_number in SIGNALS_TO_FORWARD {
         unsafe {
@@ -112,10 +113,10 @@ fn install_signal_handlers() {
     }
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(unix))]
 fn forward_pending_signal(_child_pid: u32) {}
 
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 fn forward_pending_signal(child_pid: u32) {
     let signal_number = RECEIVED_SIGNAL.swap(0, Ordering::Relaxed);
     if signal_number == 0 {
@@ -142,7 +143,7 @@ fn status_signal(status: &ExitStatus) -> Option<i32> {
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 fn terminate_with_signal(signal_number: i32) -> ! {
     let _ = std::io::stderr().flush();
     let signal_number = signal_number as c_int;
@@ -153,7 +154,7 @@ fn terminate_with_signal(signal_number: i32) -> ! {
     exit(128 + signal_number);
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(unix))]
 fn terminate_with_signal(signal_number: i32) -> ! {
     exit(128 + signal_number);
 }

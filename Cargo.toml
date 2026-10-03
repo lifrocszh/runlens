@@ -2,14 +2,18 @@
 name = "runlens"
 version = "0.1.0"
 edition = "2024"
-description = "A Linux command wrapper that reports process, resource, filesystem, and network activity."
+description = "A Linux and macOS command wrapper that reports process, resource, filesystem, and network activity."
 readme = "README.md"
 license = "MIT"
 repository = "https://github.com/lifrocszh/runlens"
-keywords = ["linux", "cli", "observability"]
+keywords = ["linux", "macos", "cli", "observability"]
 categories = ["command-line-utilities", "development-tools::debugging"]
 exclude = [".scratch/", "AGENTS.md", "docs/"]
 
 [[bin]]
 name = "runlens"
 path = "src/main.rs"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+libc = "0.2"
+libproc = "0.14.11"
